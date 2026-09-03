@@ -1,6 +1,6 @@
 <p align="center">
-  <img
-
+  <img src="docs/image/threeebs-readme-banner-2.png" alt="WebFarm Server" width="100%">
+</p>
 
 # Threeebs :3
 
