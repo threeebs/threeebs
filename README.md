@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="docs/image/threeebs-readme-banner.png"
+    src="docs/image/threeebs-readme-banner-2.png"
     alt="Threeebs :3 — Um ambiente de desenvolvimento"
     width="100%"
   >
