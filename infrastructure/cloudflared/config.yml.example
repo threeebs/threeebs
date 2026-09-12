@@ -1,0 +1,20 @@
+# Copie para config.yml e substitua os valores de exemplo.
+# O arquivo config.yml real e o JSON de credenciais não devem ser versionados.
+
+tunnel: SUBSTITUA_PELO_TUNNEL_UUID
+credentials-file: /etc/cloudflared/credentials/SUBSTITUA_PELO_TUNNEL_UUID.json
+
+ingress:
+  - hostname: painel.seudominio.com
+    service: http://portal:80
+
+  - hostname: admin.seudominio.com
+    service: http://admin:80
+
+  - hostname: editor.seudominio.com
+    service: http://sandbox:80
+
+  - hostname: "*.seudominio.com"
+    service: http://host:80
+
+  - service: http_status:404

@@ -6,7 +6,30 @@ O formato segue princípios de [Keep a Changelog](https://keepachangelog.com/), 
 
 ## Unreleased
 
-Nenhuma mudança registrada.
+### Added
+
+- Serviço realtime para edição colaborativa.
+- Fundação de runtime PHP isolado, desabilitada por padrão até provisionamento explícito.
+- Operações assíncronas de ambiente e operador opcional via `systemd`.
+- Limites de armazenamento, planos de projeto e bancos isolados por ambiente.
+- Fluxos de parceiros, redefinição de senha e primeiro acesso.
+- Assets públicos de marketing, identidade visual e licença do Three.js.
+- Instalação e atualização automatizadas com sincronização segura do `.env` e backup prévio.
+- Artigos sobre arquitetura, requisitos, domínio, Docker, Cloudflare Tunnel, portas, segurança e operação.
+- Exemplo público e sanitizado de ingress do Cloudflare Tunnel.
+
+### Changed
+
+- Portal, Admin, Host e Sandbox atualizados para os novos fluxos.
+- Docker Compose, Apache e inicialização do MySQL ampliados para os novos serviços.
+- Documentação de instalação atualizada para instalações locais e servidores.
+- README reduzido a uma página de entrada, com a documentação detalhada organizada em `docs/`.
+
+### Security
+
+- Redes internas, limites de runtime e diretórios protegidos de segredos adicionados.
+- Migrations e permissões passam a ser aplicadas de forma idempotente durante instalação e atualização.
+- Documentação agora diferencia portas locais, portas internas dos containers e exposição pelo túnel.
 
 ## [0.1.0] - 2026-09-03
 

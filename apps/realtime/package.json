@@ -1,0 +1,22 @@
+{
+  "name": "threeebs-realtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "build:client": "node build-client.mjs"
+  },
+  "dependencies": {
+    "ioredis": "5.4.1",
+    "lib0": "0.2.114",
+    "ws": "8.18.0",
+    "y-monaco": "0.1.6",
+    "y-protocols": "1.0.6",
+    "y-websocket": "2.1.0",
+    "yjs": "13.6.27"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}

@@ -22,6 +22,8 @@ storage/backups/database/*
 !storage/backups/database/.gitkeep
 storage/backups/projects/*
 !storage/backups/projects/.gitkeep
+storage/secrets/*
+!storage/secrets/.gitkeep
 
 .DS_Store
 Thumbs.db

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require '/var/www/shared/bootstrap.php';
 require '/var/www/shared/ui.php';
+require '/var/www/shared/environment_operations.php';
 
 $path = request_path();
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -15,6 +16,8 @@ function admin_navigation(): array
         ['href' => '/usuarios', 'label' => 'Usuários', 'icon' => 'users'],
         ['href' => '/clientes', 'label' => 'Clientes', 'icon' => 'clients'],
         ['href' => '/projetos', 'label' => 'Projetos', 'icon' => 'projects'],
+        ['href' => '/planos', 'label' => 'Planos', 'icon' => 'server'],
+        ['href' => '/parceiros', 'label' => 'Parceiros', 'icon' => 'users'],
         ['href' => '/jornadas', 'label' => 'Jornadas', 'icon' => 'journey'],
         ['href' => '/tarefas', 'label' => 'Tarefas', 'icon' => 'tasks'],
         ['href' => '/servidores', 'label' => 'Servidores', 'icon' => 'server'],
@@ -26,11 +29,11 @@ function admin_page_start(string $title): void
     global $path;
     if (auth_user()) {
         $GLOBALS['admin_ui_mode'] = 'app';
-        ui_app_start($title, 'Admin', admin_navigation(), $path, auth_user());
+        ui_app_start($title, 'Admin', admin_navigation(), $path, auth_user(), true);
         return;
     }
     $GLOBALS['admin_ui_mode'] = 'public';
-    ui_public_start($title, 'Admin', 'admin-auth');
+    ui_public_start($title, 'Admin', $path === '/login' ? 'admin-login-page' : 'admin-auth');
 }
 
 function admin_page_end(): void
@@ -79,9 +82,30 @@ function route_type_label(string $type): string
     };
 }
 
+function admin_partner_status_label(string $status): string
+{
+    return match ($status) {
+        'email_pendente' => 'Confirmação de e-mail pendente',
+        'email_confirmado' => 'Perfil ainda não enviado',
+        'aguardando_analise' => 'Aguardando análise',
+        'aprovado' => 'Aprovado',
+        'recusado' => 'Não aprovado',
+        default => $status,
+    };
+}
+
 function admin_project(string $uuid): array
 {
-    $stmt = db('control')->prepare('SELECT p.*, c.nome cliente_nome, c.uuid cliente_uuid FROM projetos p JOIN clientes c ON c.id=p.cliente_id WHERE p.uuid=:uuid LIMIT 1');
+    $stmt = db('control')->prepare(
+        'SELECT p.*,c.nome cliente_nome,c.uuid cliente_uuid,
+                pc.nome parceiro_nome,pc.email parceiro_email
+         FROM projetos p
+         JOIN clientes c ON c.id=p.cliente_id
+         LEFT JOIN parceiros partner
+           ON partner.usuario_uuid=c.criado_por_usuario_uuid
+         LEFT JOIN parceiro_candidaturas pc ON pc.id=partner.candidatura_id
+         WHERE p.uuid=:uuid LIMIT 1'
+    );
     $stmt->execute(['uuid' => $uuid]);
     $project = $stmt->fetch();
     if (!$project) {
@@ -105,9 +129,10 @@ if ($method === 'POST') {
             $name = trim((string) ($_POST['nome'] ?? ''));
             $email = strtolower(trim((string) ($_POST['email'] ?? '')));
             $password = (string) ($_POST['senha'] ?? '');
-            if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 10 || $password !== (string) ($_POST['confirmacao'] ?? '')) {
-                throw new ValidationException('Confira nome, e-mail e senha (mínimo 10 caracteres).');
+            if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                throw new ValidationException('Confira o nome e o e-mail.');
             }
+            require_strong_password($password, (string) ($_POST['confirmacao'] ?? ''));
             if (!hash_equals(env_required('THREEEBS_SETUP_KEY'), (string) ($_POST['setup_key'] ?? ''))) {
                 throw new ValidationException('Chave de instalação inválida.');
             }
@@ -153,6 +178,162 @@ if ($method === 'POST') {
         }
 
         $admin = require_admin();
+
+        if ($action === 'create_storage_plan') {
+            $plan = create_storage_plan(
+                (string) ($_POST['nome'] ?? ''),
+                (string) ($_POST['codigo'] ?? ''),
+                (string) ($_POST['descricao'] ?? ''),
+                (int) ($_POST['armazenamento_mib'] ?? 0),
+                (int) ($_POST['arquivos_max'] ?? 0),
+                (int) ($_POST['pastas_max'] ?? 0),
+                (int) ($_POST['arquivo_mib'] ?? 0),
+                (string) ($_POST['preco'] ?? ''),
+                (string) ($_POST['moeda'] ?? '')
+            );
+            audit_event(
+                'catalogo.plano_storage_criado',
+                'catalogo_item',
+                (string) $plan['uuid'],
+                null,
+                null,
+                null,
+                [
+                    'codigo' => $plan['codigo'],
+                    'valor' => $plan['valor'],
+                    'moeda' => $plan['moeda'],
+                    'limites' => [
+                        'armazenamento_bytes_max' => $plan['armazenamento_bytes_max'],
+                        'arquivos_max' => $plan['arquivos_max'],
+                        'pastas_max' => $plan['pastas_max'],
+                        'arquivo_bytes_max' => $plan['arquivo_bytes_max'],
+                    ],
+                ]
+            );
+            flash('Plano de storage criado no Catálogo.');
+            redirect('/planos');
+        }
+
+        if ($action === 'assign_storage_plan') {
+            $project = admin_project((string) ($_POST['projeto_uuid'] ?? ''));
+            $assignment = assign_project_storage_plan(
+                (int) $project['id'],
+                (string) ($_POST['catalog_item_uuid'] ?? ''),
+                (string) $admin['uuid']
+            );
+            audit_event(
+                'projeto.plano_storage_atribuido',
+                'projeto',
+                (string) $project['uuid'],
+                (string) $project['cliente_uuid'],
+                (string) $project['uuid'],
+                null,
+                [
+                    'atribuicao_uuid' => $assignment['assignment_uuid'],
+                    'catalog_item_uuid' => $assignment['catalog_item_uuid'],
+                    'catalog_item_codigo' => $assignment['catalog_item_codigo'],
+                    'limites' => [
+                        'armazenamento_bytes_max' => $assignment['armazenamento_bytes_max'],
+                        'arquivos_max' => $assignment['arquivos_max'],
+                        'pastas_max' => $assignment['pastas_max'],
+                        'arquivo_bytes_max' => $assignment['arquivo_bytes_max'],
+                    ],
+                ]
+            );
+            flash('Plano de storage atribuído e limites do projeto atualizados.');
+            redirect('/projetos?uuid=' . rawurlencode((string) $project['uuid']));
+        }
+
+        if ($action === 'approve_partner') {
+            $applicationUuid = (string) ($_POST['candidatura_uuid'] ?? '');
+            $control = db('control');
+            $control->beginTransaction();
+            try {
+                $stmt = $control->prepare(
+                    "SELECT * FROM parceiro_candidaturas
+                     WHERE uuid=:uuid LIMIT 1 FOR UPDATE"
+                );
+                $stmt->execute(['uuid' => $applicationUuid]);
+                $application = $stmt->fetch();
+                if (!is_array($application)
+                    || (string) $application['status'] !== 'aguardando_analise'
+                    || empty($application['usuario_uuid'])) {
+                    throw new ValidationException('Candidatura pendente válida não encontrada.');
+                }
+                if (!current_active_user(['uuid' => (string) $application['usuario_uuid']])) {
+                    throw new ValidationException('O usuário da candidatura não existe ou não está ativo.');
+                }
+                $stmt = $control->prepare(
+                    "INSERT INTO parceiros
+                        (uuid,candidatura_id,usuario_uuid,status,aprovado_por_usuario_uuid,aprovado_em)
+                     VALUES (:uuid,:application,:user,'ativo',:approved_by,UTC_TIMESTAMP(6))
+                     ON DUPLICATE KEY UPDATE
+                        status='ativo',
+                        aprovado_por_usuario_uuid=VALUES(aprovado_por_usuario_uuid),
+                        aprovado_em=VALUES(aprovado_em)"
+                );
+                $stmt->execute([
+                    'uuid' => uuid_v4(),
+                    'application' => $application['id'],
+                    'user' => $application['usuario_uuid'],
+                    'approved_by' => $admin['uuid'],
+                ]);
+                $stmt = $control->prepare(
+                    "UPDATE parceiro_candidaturas
+                     SET status='aprovado',aprovado_em=UTC_TIMESTAMP(6),
+                         aprovado_por_usuario_uuid=:approved_by,
+                         aprovacao_webhook_status='pendente',
+                         aprovacao_webhook_ultimo_erro=NULL
+                     WHERE id=:id"
+                );
+                $stmt->execute(['approved_by' => $admin['uuid'], 'id' => $application['id']]);
+                $control->commit();
+            } catch (Throwable $error) {
+                if ($control->inTransaction()) {
+                    $control->rollBack();
+                }
+                throw $error;
+            }
+            $application = partner_application_by_uuid($applicationUuid);
+            $webhook = n8n_webhook_event('parceiro.aprovado', [
+                'application_uuid' => $applicationUuid,
+                'partner_user_uuid' => (string) $application['usuario_uuid'],
+                'email' => (string) $application['email'],
+                'name' => (string) $application['nome'],
+                'portal_url' => rtrim((string) (getenv('PORTAL_URL') ?: ''), '/') . '/parceiro',
+                'approved_at' => (string) $application['aprovado_em'],
+            ], 'partner-approved:' . $applicationUuid . ':' . (string) $application['aprovado_em']);
+            update_partner_webhook_delivery($applicationUuid, 'aprovacao', $webhook);
+            audit_event('parceiro.aprovado', 'parceiro_candidatura', $applicationUuid, null, null, null, [
+                'usuario_uuid' => $application['usuario_uuid'],
+                'webhook_status' => $webhook['status'],
+            ]);
+            flash(($webhook['success'] ?? false)
+                ? 'Parceiro aprovado e comunicação enviada.'
+                : 'Parceiro aprovado. A comunicação por e-mail ficou pendente; a aprovação foi preservada.');
+            redirect('/parceiros?uuid=' . rawurlencode($applicationUuid));
+        }
+
+        if ($action === 'retry_partner_approval_webhook') {
+            $applicationUuid = (string) ($_POST['candidatura_uuid'] ?? '');
+            $application = partner_application_by_uuid($applicationUuid);
+            if (!$application || (string) $application['status'] !== 'aprovado') {
+                throw new ValidationException('Candidatura aprovada não encontrada.');
+            }
+            $webhook = n8n_webhook_event('parceiro.aprovado', [
+                'application_uuid' => $applicationUuid,
+                'partner_user_uuid' => (string) $application['usuario_uuid'],
+                'email' => (string) $application['email'],
+                'name' => (string) $application['nome'],
+                'portal_url' => rtrim((string) (getenv('PORTAL_URL') ?: ''), '/') . '/parceiro',
+                'approved_at' => (string) $application['aprovado_em'],
+            ], 'partner-approved:' . $applicationUuid . ':' . (string) $application['aprovado_em']);
+            update_partner_webhook_delivery($applicationUuid, 'aprovacao', $webhook);
+            flash(($webhook['success'] ?? false)
+                ? 'Comunicação reenviada.'
+                : 'O reenvio falhou. A aprovação continua válida.');
+            redirect('/parceiros?uuid=' . rawurlencode($applicationUuid));
+        }
 
         if ($action === 'create_journey') {
             $name = trim((string) ($_POST['nome'] ?? ''));
@@ -270,22 +451,16 @@ if ($method === 'POST') {
         }
 
         if ($action === 'create_user') {
-            $name = trim((string) ($_POST['nome'] ?? ''));
-            $email = strtolower(trim((string) ($_POST['email'] ?? '')));
-            $password = (string) ($_POST['senha'] ?? '');
-            if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 10) {
-                throw new ValidationException('Nome, e-mail válido e senha de no mínimo 10 caracteres são obrigatórios.');
-            }
-            $pdo = db('identity');
-            $pdo->beginTransaction();
-            $stmt = $pdo->prepare('INSERT INTO usuarios (uuid,nome,email,status) VALUES (:uuid,:nome,:email,\'ativo\')');
-            $uuid = uuid_v4();
-            $stmt->execute(['uuid' => $uuid, 'nome' => $name, 'email' => $email]);
-            $stmt = $pdo->prepare("INSERT INTO credenciais (uuid,usuario_id,tipo,identificador,segredo_hash,ativa) VALUES (:uuid,:user,'senha','',:hash,1)");
-            $stmt->execute(['uuid' => uuid_v4(), 'user' => $pdo->lastInsertId(), 'hash' => password_hash($password, PASSWORD_DEFAULT)]);
-            $pdo->commit();
+            $result = create_user_with_first_access(
+                (string) ($_POST['nome'] ?? ''),
+                (string) ($_POST['email'] ?? ''),
+                $admin
+            );
+            $uuid = (string) $result['user']['uuid'];
             audit_event('usuario.criado', 'usuario', $uuid);
-            flash('Usuário criado.');
+            flash(($result['webhook']['success'] ?? false)
+                ? 'Usuário criado e convite de primeiro acesso enviado.'
+                : 'Usuário criado, mas o webhook de primeiro acesso não foi entregue. Confira a integração n8n.');
             redirect('/usuarios?uuid=' . rawurlencode($uuid));
         }
 
@@ -427,6 +602,35 @@ if ($method === 'POST') {
             redirect('/projetos?uuid=' . rawurlencode($projectUuid));
         }
 
+        if (in_array($action, ['queue_database_provision', 'queue_php_activation'], true)) {
+            $project = admin_project((string) ($_POST['projeto_uuid'] ?? ''));
+            $environment = environment_for_project(
+                (string) $project['uuid'],
+                (string) ($_POST['ambiente_uuid'] ?? '')
+            );
+            if ((string) $environment['tipo'] === 'production'
+                && (string) ($_POST['confirm_production'] ?? '') !== '1') {
+                throw new ValidationException(
+                    'Confirme explicitamente a operação no ambiente de Produção.'
+                );
+            }
+            $operationType = $action === 'queue_database_provision'
+                ? 'database.provision'
+                : 'runtime.php.activate';
+            queue_environment_operation(
+                $environment,
+                $operationType,
+                (string) $admin['uuid'],
+                ['production_confirmed' => (string) $environment['tipo'] === 'production']
+            );
+            flash(
+                $operationType === 'database.provision'
+                    ? 'Criação do banco adicionada à fila.'
+                    : 'Ativação do PHP adicionada à fila.'
+            );
+            redirect('/projetos?uuid=' . rawurlencode((string) $project['uuid']));
+        }
+
         if ($action === 'provision_environments') {
             $project = admin_project((string) $_POST['projeto_uuid']);
             $serverId = db('control')->query("SELECT id FROM servidores WHERE padrao=1 AND status='ativo' ORDER BY id LIMIT 1")->fetchColumn();
@@ -436,9 +640,23 @@ if ($method === 'POST') {
             $stmt = db('control')->prepare("INSERT INTO ambientes (uuid,projeto_id,servidor_id,tipo,nome,slug,diretorio,status)
                 VALUES (:uuid,:project,:server,:type,:name,:slug,:directory,'ativo')
                 ON DUPLICATE KEY UPDATE servidor_id=VALUES(servidor_id),nome=VALUES(nome),slug=VALUES(slug),diretorio=VALUES(diretorio)");
+            $runtimeStmt = db('control')->prepare(
+                "INSERT INTO ambiente_runtimes
+                    (uuid,ambiente_id,tipo,execucao_habilitada,mount_target,status,configuracao)
+                 SELECT :uuid,a.id,'runtime.static',0,'/var/www/project','planejado',
+                        JSON_OBJECT('document_root','/var/www/project')
+                   FROM ambientes a
+                  WHERE a.projeto_id=:project AND a.tipo=:type
+                 ON DUPLICATE KEY UPDATE ambiente_id=VALUES(ambiente_id)"
+            );
             foreach (['sandbox' => ['Sandbox', 'sandbox'], 'production' => ['Produção', 'production']] as $type => [$name, $folder]) {
                 $relative = $project['uuid'] . '/' . $folder;
                 $stmt->execute(['uuid' => uuid_v4(), 'project' => $project['id'], 'server' => $serverId, 'type' => $type, 'name' => $name, 'slug' => $folder, 'directory' => $relative]);
+                $runtimeStmt->execute([
+                    'uuid' => uuid_v4(),
+                    'project' => $project['id'],
+                    'type' => $type,
+                ]);
                 $directory = safe_environment_path($relative, true);
                 $index = $directory . '/index.html';
                 if (!is_file($index)) {
@@ -593,15 +811,34 @@ if (($state['status'] ?? 'pendente') === 'pendente') {
     admin_page_start('Threeebs Admin :3 — Primeiro acesso');
     show_flash();
     echo '<form method="post">' . csrf_field() . '<input type="hidden" name="_action" value="setup">';
-    input('nome', 'Nome'); input('email', 'E-mail', 'email'); input('senha', 'Senha (mínimo 10 caracteres)', 'password'); input('confirmacao', 'Confirmar senha', 'password'); input('setup_key', 'THREEEBS_SETUP_KEY', 'password');
+    input('nome', 'Nome'); input('email', 'E-mail', 'email'); echo ui_new_password_fields('confirmacao'); input('setup_key', 'THREEEBS_SETUP_KEY', 'password');
     echo '<button>Criar primeiro administrador</button></form>';
     admin_page_end(); exit;
 }
 
 if ($path === '/login' && !auth_user()) {
-    admin_page_start('Threeebs Admin :3 — Entrar'); show_flash();
-    echo '<form method="post">' . csrf_field() . '<input type="hidden" name="_action" value="login">';
-    input('email', 'E-mail', 'email'); input('senha', 'Senha', 'password'); echo '<button>Entrar</button></form>';
+    admin_page_start('Acesso administrativo');
+    $passwordResetUrl = rtrim((string) (getenv('PORTAL_URL') ?: ''), '/') . '/esqueci-senha';
+    echo '<section class="admin-login-shell" aria-labelledby="admin-login-title">'
+        . '<div class="admin-login-story"><a class="admin-login-brand" href="https://www.3eb.site" aria-label="Threeebs — voltar ao início">'
+        . '<strong>Threeebs <span>:3</span></strong><small>Admin</small></a>'
+        . '<div class="admin-login-copy"><p class="eyebrow"><span></span>Operação central</p>'
+        . '<h2>Onde projetos ganham direção.</h2><p>Um espaço reservado para organizar pessoas, ambientes e toda a operação Threeebs.</p></div>'
+        . '<div class="admin-login-orbit" aria-hidden="true"><span>:3</span><i></i><i></i><i></i></div>'
+        . '<p class="admin-login-status"><span></span>Ambiente administrativo protegido</p></div>'
+        . '<div class="admin-login-panel"><a class="button button--secondary admin-login-back" href="https://www.3eb.site">'
+        . ui_icon('home', 18) . 'Voltar ao início</a><div class="admin-login-card">'
+        . '<p class="eyebrow"><span></span>Acesso restrito</p><h1 id="admin-login-title">Bem-vindo de volta.</h1>'
+        . '<p class="admin-login-intro">Use suas credenciais administrativas para continuar.</p>'
+        . '<div class="admin-login-flash">';
+    show_flash();
+    echo '</div><form class="admin-login-form" method="post">' . csrf_field()
+        . '<input type="hidden" name="_action" value="login">'
+        . '<label class="field">E-mail<input type="email" name="email" autocomplete="username" inputmode="email" autofocus required></label>'
+        . ui_password_input('senha', 'Senha')
+        . '<div class="admin-login-options"><a href="' . h($passwordResetUrl) . '">Esqueci minha senha</a></div>'
+        . '<button class="button button--primary admin-login-submit" type="submit">Entrar no Admin</button></form>'
+        . '<p class="admin-login-note">Acesso monitorado e exclusivo para pessoas autorizadas.</p></div></div></section>';
     admin_page_end(); exit;
 }
 
@@ -622,11 +859,14 @@ if ($path === '/') {
 } elseif ($path === '/usuarios') {
     $uuid = (string) ($_GET['uuid'] ?? '');
     if ($uuid !== '') {
-        $stmt = db('identity')->prepare('SELECT uuid,nome,email,status,created_at FROM usuarios WHERE uuid=:uuid'); $stmt->execute(['uuid' => $uuid]); $item = $stmt->fetch();
-        echo $item ? '<h2>' . h($item['nome']) . '</h2><dl><dt>E-mail</dt><dd>' . h($item['email']) . '</dd><dt>Status</dt><dd>' . h($item['status']) . '</dd><dt>UUID</dt><dd>' . h($item['uuid']) . '</dd></dl>' : '<p>Usuário não encontrado.</p>';
+        $stmt = db('identity')->prepare("SELECT u.uuid,u.nome,u.email,u.status,u.created_at,
+            EXISTS(SELECT 1 FROM credenciais c WHERE c.usuario_id=u.id AND c.tipo='senha' AND c.ativa=1) possui_senha
+            FROM usuarios u WHERE u.uuid=:uuid");
+        $stmt->execute(['uuid' => $uuid]); $item = $stmt->fetch();
+        echo $item ? '<h2>' . h($item['nome']) . '</h2><dl><dt>E-mail</dt><dd>' . h($item['email']) . '</dd><dt>Status</dt><dd>' . h($item['status']) . '</dd><dt>Acesso</dt><dd>' . ((int) $item['possui_senha'] === 1 ? 'Senha definida' : 'Aguardando primeiro acesso') . '</dd><dt>UUID</dt><dd>' . h($item['uuid']) . '</dd></dl>' : '<p>Usuário não encontrado.</p>';
     }
-    echo '<h2>Criar usuário</h2><p class="admin-intro">Crie a identidade primeiro. Depois associe o usuário a um cliente e aos projetos que ele poderá acessar.</p><form method="post">' . csrf_field() . '<input type="hidden" name="_action" value="create_user"><input type="hidden" name="_return" value="/usuarios">';
-    input('nome','Nome'); input('email','E-mail','email'); input('senha','Senha temporária (mínimo 10 caracteres)','password'); echo '<button>Criar</button></form><h2>Usuários</h2><ul>';
+    echo '<h2>Criar usuário</h2><p class="admin-intro">Informe apenas nome e e-mail. O usuário receberá um link de primeiro acesso para criar e confirmar uma senha forte.</p><form method="post">' . csrf_field() . '<input type="hidden" name="_action" value="create_user"><input type="hidden" name="_return" value="/usuarios">';
+    input('nome','Nome'); input('email','E-mail','email'); echo '<button>Criar e enviar primeiro acesso</button></form><h2>Usuários</h2><ul>';
     foreach (db('identity')->query('SELECT uuid,nome,email,status FROM usuarios ORDER BY nome,email') as $user) echo '<li><a href="/usuarios?uuid=' . h($user['uuid']) . '">' . h($user['nome'] ?: $user['email']) . '</a> — ' . h($user['status']) . '</li>';
     echo '</ul>';
 } elseif ($path === '/jornadas') {
@@ -747,13 +987,88 @@ if ($path === '/') {
             echo '</ul>';
         }
     }
+} elseif ($path === '/parceiros') {
+    $uuid = (string) ($_GET['uuid'] ?? '');
+    echo '<div class="page-heading compact-heading"><p class="eyebrow"><span></span>Rede Threeebs</p>'
+        . '<h1>Candidaturas de parceiros</h1><p>Confirmação de e-mail, análise administrativa e situação das comunicações.</p></div>';
+    if ($uuid !== '') {
+        $stmt = db('control')->prepare(
+            'SELECT pc.*,u.status usuario_status,p.uuid parceiro_uuid,p.status parceiro_status
+             FROM parceiro_candidaturas pc
+             LEFT JOIN threeebs_identity.usuarios u ON u.uuid=pc.usuario_uuid
+             LEFT JOIN parceiros p ON p.candidatura_id=pc.id
+             WHERE pc.uuid=:uuid LIMIT 1'
+        );
+        $stmt->execute(['uuid' => $uuid]);
+        $application = $stmt->fetch();
+        if (!$application) {
+            http_response_code(404);
+            echo '<p class="empty-state">Candidatura não encontrada.</p>';
+        } else {
+            echo '<section class="admin-card partner-review"><div class="section-title"><h2>'
+                . h($application['nome'] ?: $application['email']) . '</h2><span>'
+                . h(admin_partner_status_label((string) $application['status'])) . '</span></div>'
+                . '<dl class="detail-list"><div><dt>E-mail</dt><dd>' . h($application['email']) . '</dd></div>'
+                . '<div><dt>Confirmado em</dt><dd>' . h($application['email_confirmado_em'] ?: 'pendente') . '</dd></div>'
+                . '<div><dt>GitHub</dt><dd>' . ($application['github_url'] ? '<a href="' . h($application['github_url']) . '" target="_blank" rel="noopener">Abrir perfil</a>' : 'não informado') . '</dd></div>'
+                . '<div><dt>LinkedIn</dt><dd>' . ($application['linkedin_url'] ? '<a href="' . h($application['linkedin_url']) . '" target="_blank" rel="noopener">Abrir perfil</a>' : 'não informado') . '</dd></div>'
+                . '<div><dt>Portfólio</dt><dd>' . ($application['portfolio_url'] ? '<a href="' . h($application['portfolio_url']) . '" target="_blank" rel="noopener">Abrir site</a>' : 'não informado') . '</dd></div>'
+                . '<div><dt>Tecnologias</dt><dd>' . nl2br(h($application['tecnologias'] ?: 'não informado')) . '</dd></div>'
+                . '<div><dt>Experiência</dt><dd>' . nl2br(h($application['experiencia'] ?: 'não informado')) . '</dd></div>'
+                . '<div><dt>Enviada em</dt><dd>' . h($application['candidatura_enviada_em'] ?: 'pendente') . '</dd></div>'
+                . '<div><dt>Aprovada por</dt><dd>' . h($application['aprovado_por_usuario_uuid'] ?: 'pendente') . '</dd></div>'
+                . '<div><dt>Aprovada em</dt><dd>' . h($application['aprovado_em'] ?: 'pendente') . '</dd></div></dl>'
+                . '<h3>Comunicações n8n</h3><table><thead><tr><th>Evento</th><th>Status</th><th>Tentativas</th><th>Último envio</th><th>Erro</th></tr></thead><tbody>'
+                . '<tr><td>Confirmação</td><td>' . h($application['confirmacao_webhook_status']) . '</td><td>' . h($application['confirmacao_webhook_tentativas']) . '</td><td>' . h($application['confirmacao_webhook_ultimo_envio_em'] ?: '—') . '</td><td>' . h($application['confirmacao_webhook_ultimo_erro'] ?: '—') . '</td></tr>'
+                . '<tr><td>Aprovação</td><td>' . h($application['aprovacao_webhook_status']) . '</td><td>' . h($application['aprovacao_webhook_tentativas']) . '</td><td>' . h($application['aprovacao_webhook_ultimo_envio_em'] ?: '—') . '</td><td>' . h($application['aprovacao_webhook_ultimo_erro'] ?: '—') . '</td></tr>'
+                . '</tbody></table>';
+            if ((string) $application['status'] === 'aguardando_analise') {
+                echo '<form method="post">' . csrf_field()
+                    . '<input type="hidden" name="_action" value="approve_partner">'
+                    . '<input type="hidden" name="candidatura_uuid" value="' . h($uuid) . '">'
+                    . '<input type="hidden" name="_return" value="/parceiros?uuid=' . h($uuid) . '">'
+                    . '<button class="button button--primary">Aprovar parceiro</button></form>';
+            }
+            if ((string) $application['status'] === 'aprovado'
+                && (string) $application['aprovacao_webhook_status'] !== 'enviado') {
+                echo '<form method="post">' . csrf_field()
+                    . '<input type="hidden" name="_action" value="retry_partner_approval_webhook">'
+                    . '<input type="hidden" name="candidatura_uuid" value="' . h($uuid) . '">'
+                    . '<input type="hidden" name="_return" value="/parceiros?uuid=' . h($uuid) . '">'
+                    . '<button class="button button--secondary">Reenviar comunicação</button></form>';
+            }
+            echo '</section>';
+        }
+    }
+    $applications = db('control')->query(
+        'SELECT uuid,nome,email,status,email_confirmado_em,candidatura_enviada_em,
+                confirmacao_webhook_status,aprovacao_webhook_status
+         FROM parceiro_candidaturas ORDER BY created_at DESC,id DESC'
+    );
+    echo '<table><thead><tr><th>Candidato</th><th>Situação</th><th>E-mail confirmado</th><th>Comunicação</th></tr></thead><tbody>';
+    foreach ($applications as $application) {
+        echo '<tr><td><a href="/parceiros?uuid=' . h($application['uuid']) . '">'
+            . h($application['nome'] ?: $application['email']) . '</a><br><small>' . h($application['email']) . '</small></td>'
+            . '<td>' . h(admin_partner_status_label((string) $application['status'])) . '</td>'
+            . '<td>' . h($application['email_confirmado_em'] ?: 'pendente') . '</td>'
+            . '<td>confirmação: ' . h($application['confirmacao_webhook_status'])
+            . '<br>aprovação: ' . h($application['aprovacao_webhook_status']) . '</td></tr>';
+    }
+    echo '</tbody></table>';
 } elseif ($path === '/clientes') {
     $uuid = (string) ($_GET['uuid'] ?? '');
     if ($uuid !== '') {
-        $stmt = db('control')->prepare('SELECT * FROM clientes WHERE uuid=:uuid'); $stmt->execute(['uuid'=>$uuid]); $client=$stmt->fetch();
+        $stmt = db('control')->prepare(
+            'SELECT c.*,pc.nome parceiro_nome,pc.email parceiro_email
+             FROM clientes c
+             LEFT JOIN parceiros partner ON partner.usuario_uuid=c.criado_por_usuario_uuid
+             LEFT JOIN parceiro_candidaturas pc ON pc.id=partner.candidatura_id
+             WHERE c.uuid=:uuid'
+        ); $stmt->execute(['uuid'=>$uuid]); $client=$stmt->fetch();
         if (!$client) { http_response_code(404); echo '<p>Cliente não encontrado.</p>'; }
         else {
-            echo '<h2>' . h($client['nome']) . '</h2><p>Slug: ' . h($client['slug']) . ' | Status: ' . h($client['status']) . '</p>';
+            echo '<h2>' . h($client['nome']) . '</h2><p>Slug: ' . h($client['slug']) . ' | Status: ' . h($client['status'])
+                . ' | Parceiro responsável: ' . h($client['parceiro_nome'] ?: $client['parceiro_email'] ?: 'cadastro administrativo') . '</p>';
             $users=db('identity')->query('SELECT uuid,nome,email FROM usuarios ORDER BY nome,email')->fetchAll();
             echo '<h3>Associar usuário</h3><form method="post">'.csrf_field().'<input type="hidden" name="_action" value="link_client_user"><input type="hidden" name="cliente_uuid" value="'.h($uuid).'"><input type="hidden" name="_return" value="/clientes?uuid='.h($uuid).'"><select name="usuario_uuid">';
             foreach($users as $u) echo '<option value="'.h($u['uuid']).'">'.h($u['nome'].' — '.$u['email']).'</option>';
@@ -768,12 +1083,100 @@ if ($path === '/') {
         }
     }
     echo '<h2>Criar cliente</h2><p class="admin-intro">O cliente agrupa colaboradores e projetos. Use um slug curto, estável e sem espaços.</p><form method="post">'.csrf_field().'<input type="hidden" name="_action" value="create_client"><input type="hidden" name="_return" value="/clientes">'; input('nome','Nome'); input('slug','Slug'); input('status','Status','text','ativo'); echo '<button>Criar</button></form><h2>Clientes</h2><ul>';
-    foreach(db('control')->query('SELECT uuid,nome,status FROM clientes ORDER BY nome') as $c) echo '<li><a href="/clientes?uuid='.h($c['uuid']).'">'.h($c['nome']).'</a> — '.h($c['status']).'</li>'; echo '</ul>';
+    foreach(db('control')->query(
+        'SELECT c.uuid,c.nome,c.status,pc.nome parceiro_nome,pc.email parceiro_email
+         FROM clientes c
+         LEFT JOIN parceiros partner ON partner.usuario_uuid=c.criado_por_usuario_uuid
+         LEFT JOIN parceiro_candidaturas pc ON pc.id=partner.candidatura_id
+         ORDER BY c.nome'
+    ) as $c) echo '<li><a href="/clientes?uuid='.h($c['uuid']).'">'.h($c['nome']).'</a> — '.h($c['status'])
+        .' — parceiro: '.h($c['parceiro_nome'] ?: $c['parceiro_email'] ?: 'cadastro administrativo').'</li>'; echo '</ul>';
+} elseif ($path === '/planos') {
+    echo '<h2>Planos de storage</h2>'
+        . '<p class="admin-intro">Defina a oferta comercial e seus limites técnicos. Criar um plano não o atribui automaticamente a nenhum projeto.</p>'
+        . '<form method="post">' . csrf_field()
+        . '<input type="hidden" name="_action" value="create_storage_plan">'
+        . '<input type="hidden" name="_return" value="/planos">';
+    input('nome', 'Nome do plano');
+    input('codigo', 'Código estável');
+    echo '<p><label>Descrição<br><textarea name="descricao" maxlength="4000"></textarea></label></p>';
+    input('armazenamento_mib', 'Armazenamento por projeto (MiB)', 'number');
+    input('arquivos_max', 'Quantidade máxima de arquivos', 'number');
+    input('pastas_max', 'Quantidade máxima de pastas', 'number');
+    input('arquivo_mib', 'Tamanho máximo por arquivo (MiB)', 'number');
+    input('preco', 'Preço por projeto/mês', 'text');
+    input('moeda', 'Moeda ISO');
+    echo '<button>Criar plano</button></form>'
+        . '<h3>Planos disponíveis</h3>';
+    $plans = storage_plan_catalog_items();
+    if ($plans === []) {
+        echo '<p>Nenhum plano de storage cadastrado.</p>';
+    } else {
+        echo '<table><thead><tr><th>Plano</th><th>Preço vigente</th><th>Storage</th><th>Arquivos</th><th>Pastas</th><th>Arquivo</th></tr></thead><tbody>';
+        foreach ($plans as $plan) {
+            $price = $plan['valor'] !== null
+                ? number_format((float) $plan['valor'], 2, ',', '.') . ' ' . $plan['moeda']
+                : 'sem preço vigente';
+            echo '<tr><td><strong>' . h($plan['nome']) . '</strong><br><code>' . h($plan['codigo']) . '</code></td>'
+                . '<td>' . h($price) . '</td>'
+                . '<td>' . h(storage_bytes_label((int) $plan['armazenamento_bytes_max'])) . '</td>'
+                . '<td>' . h($plan['arquivos_max']) . '</td>'
+                . '<td>' . h($plan['pastas_max']) . '</td>'
+                . '<td>' . h(storage_bytes_label((int) $plan['arquivo_bytes_max'])) . '</td></tr>';
+        }
+        echo '</tbody></table>';
+    }
 } elseif ($path === '/projetos') {
     $uuid=(string)($_GET['uuid']??'');
-    if($uuid===''){ echo '<h2>Projetos</h2><ul>'; foreach(db('control')->query('SELECT p.uuid,p.nome,p.status,c.nome cliente FROM projetos p JOIN clientes c ON c.id=p.cliente_id ORDER BY p.nome') as $p) echo '<li><a href="/projetos?uuid='.h($p['uuid']).'">'.h($p['nome']).'</a> — '.h($p['cliente']).' — '.h($p['status']).'</li>'; echo '</ul>'; }
+    if($uuid===''){ echo '<h2>Projetos</h2><ul>'; foreach(db('control')->query(
+        'SELECT p.uuid,p.nome,p.status,c.nome cliente,pc.nome parceiro_nome,pc.email parceiro_email
+         FROM projetos p
+         JOIN clientes c ON c.id=p.cliente_id
+         LEFT JOIN parceiros partner ON partner.usuario_uuid=c.criado_por_usuario_uuid
+         LEFT JOIN parceiro_candidaturas pc ON pc.id=partner.candidatura_id
+         ORDER BY p.nome'
+    ) as $p) echo '<li><a href="/projetos?uuid='.h($p['uuid']).'">'.h($p['nome']).'</a> — '.h($p['cliente']).' — '.h($p['status'])
+        .' — parceiro: '.h($p['parceiro_nome'] ?: $p['parceiro_email'] ?: 'cadastro administrativo').'</li>'; echo '</ul>'; }
     else {
-        $project=admin_project($uuid); echo '<h2>'.h($project['nome']).'</h2><p>Cliente: '.h($project['cliente_nome']).' | Slug: '.h($project['slug']).' | Status: '.h($project['status']).'</p><p>'.nl2br(h($project['descricao'])).'</p>';
+        $project=admin_project($uuid); echo '<h2>'.h($project['nome']).'</h2><p>Cliente: '.h($project['cliente_nome']).' | Slug: '.h($project['slug']).' | Status: '.h($project['status'])
+            .' | Parceiro responsável: '.h($project['parceiro_nome'] ?: $project['parceiro_email'] ?: 'cadastro administrativo').'</p><p>'.nl2br(h($project['descricao'])).'</p>';
+        $storage = project_storage_summary((int) $project['id']);
+        $storagePercent = (int) $storage['armazenamento_bytes_max'] > 0
+            ? min(100, round(100 * (int) $storage['armazenamento_bytes_usados'] / (int) $storage['armazenamento_bytes_max'], 2))
+            : 0;
+        echo '<h3>Plano e uso de storage</h3><dl>'
+            . '<dt>Plano atual</dt><dd>' . h($storage['catalog_item_nome'] ?: 'Configuração padrão ou manual') . '</dd>'
+            . '<dt>Armazenamento</dt><dd>' . h(storage_bytes_label((int) $storage['armazenamento_bytes_usados']))
+            . ' de ' . h(storage_bytes_label((int) $storage['armazenamento_bytes_max']))
+            . ' (' . h($storagePercent) . '%)</dd>'
+            . '<dt>Arquivos</dt><dd>' . h($storage['arquivos_usados']) . ' de ' . h($storage['arquivos_max']) . '</dd>'
+            . '<dt>Pastas</dt><dd>' . h($storage['pastas_usadas']) . ' de ' . h($storage['pastas_max']) . '</dd>'
+            . '<dt>Tamanho por arquivo</dt><dd>' . h(storage_bytes_label((int) $storage['arquivo_bytes_max'])) . '</dd>'
+            . '<dt>Última reconciliação</dt><dd>' . h($storage['reconciliado_em'] ?: 'ainda não executada') . '</dd>'
+            . '</dl>';
+        $storagePlans = storage_plan_catalog_items();
+        if ($storagePlans === []) {
+            echo '<p>Nenhum item ativo do Catálogo possui limites de storage configurados.</p>';
+        } else {
+            echo '<form method="post">' . csrf_field()
+                . '<input type="hidden" name="_action" value="assign_storage_plan">'
+                . '<input type="hidden" name="projeto_uuid" value="' . h($uuid) . '">'
+                . '<input type="hidden" name="_return" value="/projetos?uuid=' . h($uuid) . '">'
+                . '<p><label>Plano de storage<br><select name="catalog_item_uuid" required>';
+            foreach ($storagePlans as $storagePlan) {
+                $price = $storagePlan['valor'] !== null
+                    ? ' — ' . number_format((float) $storagePlan['valor'], 2, ',', '.')
+                        . ' ' . h($storagePlan['moeda'])
+                    : ' — sem preço vigente';
+                echo '<option value="' . h($storagePlan['uuid']) . '">'
+                    . h($storagePlan['nome']) . ' — '
+                    . h(storage_bytes_label((int) $storagePlan['armazenamento_bytes_max']))
+                    . $price . '</option>';
+            }
+            echo '</select></label></p>'
+                . '<p class="role-help">A atribuição cria um snapshot dos limites. Reduzir o plano não apaga arquivos existentes.</p>'
+                . '<button>Atribuir plano e aplicar limites</button></form>';
+        }
         $users = db('control')->prepare(
             "SELECT u.uuid,u.nome,u.email
              FROM threeebs_identity.usuarios u
@@ -794,7 +1197,47 @@ if ($path === '/') {
         echo '<p class="role-help">O usuário precisa ser membro ativo do cliente antes de receber acesso ao projeto.</p><label><input type="checkbox" name="ativo" checked> vínculo ativo</label> <button>Salvar vínculo</button></form>';
         $stmt=db('control')->prepare('SELECT usuario_uuid,papel,ativo FROM projeto_usuarios WHERE projeto_id=:id');$stmt->execute(['id'=>$project['id']]);echo '<ul>';foreach($stmt as $link)echo '<li>'.h($link['usuario_uuid']).' — '.h($link['papel']).' — '.($link['ativo']?'ativo':'inativo').'</li>';echo '</ul>';
         echo '<h3>Ambientes</h3><form method="post">'.csrf_field().'<input type="hidden" name="_action" value="provision_environments"><input type="hidden" name="projeto_uuid" value="'.h($uuid).'"><input type="hidden" name="_return" value="/projetos?uuid='.h($uuid).'"><button>Criar ambientes padrão</button></form>';
-        $stmt=db('control')->prepare('SELECT a.*,s.nome servidor FROM ambientes a JOIN servidores s ON s.id=a.servidor_id WHERE a.projeto_id=:id ORDER BY a.tipo');$stmt->execute(['id'=>$project['id']]);$environments=$stmt->fetchAll();echo '<ul>';foreach($environments as $e)echo '<li>'.h($e['nome']).' — '.h($e['diretorio']).' — '.h($e['status']).'</li>';echo '</ul>';
+        $environments = project_environment_operation_rows((int) $project['id']);
+        if (!$environments) {
+            echo '<p>Crie os ambientes antes de configurar PHP ou banco de dados.</p>';
+        } else {
+            echo '<table><thead><tr><th>Ambiente</th><th>Banco de dados</th><th>PHP</th><th>Ações</th></tr></thead><tbody>';
+            foreach ($environments as $environment) {
+                $databaseActive = (int) $environment['database_ativo'] === 1;
+                $phpActive = (string) $environment['runtime_tipo'] === 'runtime.php'
+                    && (int) $environment['execucao_habilitada'] === 1
+                    && (string) $environment['runtime_status'] === 'ativo';
+                $databaseBusy = in_array((string) $environment['database_operacao_status'], ['pendente', 'executando'], true);
+                $phpBusy = in_array((string) $environment['php_operacao_status'], ['pendente', 'executando'], true);
+                echo '<tr><td><strong>' . h($environment['nome']) . '</strong><br><code>'
+                    . h($environment['diretorio']) . '</code><br>' . h($environment['status']) . '</td>'
+                    . '<td>' . ($databaseActive ? 'ativo' : environment_operation_status_label($environment['database_operacao_status']))
+                    . '</td><td>' . ($phpActive ? 'ativo' : environment_operation_status_label($environment['php_operacao_status']))
+                    . '</td><td>';
+                foreach ([
+                    'queue_database_provision' => ['Criar banco de dados', $databaseActive || $databaseBusy],
+                    'queue_php_activation' => ['Ativar PHP', $phpActive || $phpBusy],
+                ] as $operationAction => [$label, $disabled]) {
+                    echo '<form method="post">'
+                        . csrf_field()
+                        . '<input type="hidden" name="_action" value="' . h($operationAction) . '">'
+                        . '<input type="hidden" name="projeto_uuid" value="' . h($uuid) . '">'
+                        . '<input type="hidden" name="ambiente_uuid" value="' . h($environment['uuid']) . '">'
+                        . '<input type="hidden" name="_return" value="/projetos?uuid=' . h($uuid) . '">';
+                    if ((string) $environment['tipo'] === 'production') {
+                        echo '<label><input type="checkbox" name="confirm_production" value="1" required> '
+                            . 'confirmar Produção</label><br>';
+                    }
+                    echo '<button' . ($disabled ? ' disabled' : '') . '>' . h($label) . '</button></form>';
+                }
+                if (!empty($environment['ultima_operacao_erro'])) {
+                    echo '<br><small>Última falha: <code>'
+                        . h($environment['ultima_operacao_erro']) . '</code></small>';
+                }
+                echo '</td></tr>';
+            }
+            echo '</tbody></table>';
+        }
         $navigation=project_environment_navigation((int)$project['id']);
         $production=$navigation['production']??null;
         $sandbox=$navigation['sandbox']??null;
@@ -863,5 +1306,4 @@ if ($path === '/') {
 elseif($path==='/servidores'){echo '<h2>Servidores</h2><table><tr><th>Nome</th><th>Driver</th><th>Hostname</th><th>Status</th></tr>';foreach(db('control')->query('SELECT nome,driver,hostname,status FROM servidores ORDER BY nome') as $s)echo '<tr><td>'.h($s['nome']).'</td><td>'.h($s['driver']).'</td><td>'.h($s['hostname']).'</td><td>'.h($s['status']).'</td></tr>';echo '</table>';}
 else{http_response_code(404);echo '<p>Página não encontrada.</p>';}
 
-echo '<form class="logout-form" method="post">'.csrf_field().'<input type="hidden" name="_action" value="logout"><button class="button button--ghost">Sair</button></form>';
 admin_page_end();

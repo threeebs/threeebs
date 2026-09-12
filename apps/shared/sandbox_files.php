@@ -8,7 +8,7 @@ const SANDBOX_EDITOR_MAX_DEPTH = 12;
 
 function sandbox_editor_extensions(): array
 {
-    return ['html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'md', 'txt', 'xml', 'svg'];
+    return ['html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'md', 'txt', 'xml', 'svg', 'php', 'sql'];
 }
 
 function sandbox_editor_normalize_path(string $path, bool $allowRoot = false): string

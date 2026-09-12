@@ -111,21 +111,43 @@ SQL
 GRANT SELECT, INSERT, UPDATE ON threeebs_identity.* TO '${THREEEBS_ADMIN_DB_USER}'@'%';
 GRANT SELECT, INSERT, UPDATE ON threeebs_control.* TO '${THREEEBS_ADMIN_DB_USER}'@'%';
 GRANT SELECT, INSERT, UPDATE ON threeebs_work.* TO '${THREEEBS_ADMIN_DB_USER}'@'%';
+GRANT SELECT, INSERT ON threeebs_catalog.itens TO '${THREEEBS_ADMIN_DB_USER}'@'%';
+GRANT SELECT, INSERT ON threeebs_catalog.precos TO '${THREEEBS_ADMIN_DB_USER}'@'%';
+GRANT SELECT, INSERT ON threeebs_catalog.item_limites_storage TO '${THREEEBS_ADMIN_DB_USER}'@'%';
 GRANT INSERT ON threeebs_audit.eventos TO '${THREEEBS_ADMIN_DB_USER}'@'%';
 
 GRANT SELECT ON threeebs_identity.usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_identity.usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_identity.credenciais TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_identity.credenciais TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT UPDATE ON threeebs_identity.credenciais TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT, INSERT, UPDATE ON threeebs_identity.tokens TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT UPDATE ON threeebs_identity.sessoes TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT, INSERT, UPDATE ON threeebs_identity.convites TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT, INSERT ON threeebs_identity.eventos_autenticacao TO '${THREEEBS_PORTAL_DB_USER}'@'%';
-GRANT UPDATE (ultimo_login_em, bloqueado_ate, bloqueio_motivo)
+GRANT UPDATE (ultimo_login_em, bloqueado_ate, bloqueio_motivo, email_verificado_em)
     ON threeebs_identity.usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.clientes TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.cliente_usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.projetos TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT ON threeebs_control.projeto_storage_quotas TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT ON threeebs_control.projeto_planos TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.projeto_usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.ambientes TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.rotas_web TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.plataforma_usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT INSERT ON threeebs_control.interessados TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT, INSERT, UPDATE ON threeebs_control.parceiro_candidaturas TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT ON threeebs_control.parceiros TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.clientes TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.cliente_usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.projetos TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.projeto_usuarios TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.ambientes TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.ambiente_runtimes TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_control.rotas_web TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT SELECT ON threeebs_control.servidores TO '${THREEEBS_PORTAL_DB_USER}'@'%';
+GRANT INSERT ON threeebs_audit.eventos TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_work.quadros TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_work.colunas TO '${THREEEBS_PORTAL_DB_USER}'@'%';
 GRANT SELECT ON threeebs_work.tarefas TO '${THREEEBS_PORTAL_DB_USER}'@'%';
@@ -143,10 +165,14 @@ GRANT SELECT ON threeebs_control.projeto_usuarios TO '${THREEEBS_SANDBOX_DB_USER
 GRANT SELECT ON threeebs_control.ambientes TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.rotas_web TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.plataforma_usuarios TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
+GRANT SELECT, INSERT, UPDATE ON threeebs_control.projeto_storage_quotas TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON threeebs_control.projeto_arquivos TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
+GRANT SELECT, INSERT, UPDATE ON threeebs_control.projeto_storage_reservas TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
 GRANT INSERT ON threeebs_audit.eventos TO '${THREEEBS_SANDBOX_DB_USER}'@'%';
 
 GRANT SELECT ON threeebs_control.rotas_web TO '${THREEEBS_HOST_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.ambientes TO '${THREEEBS_HOST_DB_USER}'@'%';
+GRANT SELECT ON threeebs_control.ambiente_runtimes TO '${THREEEBS_HOST_DB_USER}'@'%';
 GRANT SELECT ON threeebs_control.projetos TO '${THREEEBS_HOST_DB_USER}'@'%';
 FLUSH PRIVILEGES;
 SQL

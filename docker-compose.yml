@@ -8,6 +8,9 @@ x-php-environment: &php-environment
   LOGIN_WINDOW_SECONDS: ${LOGIN_WINDOW_SECONDS:-600}
   LOGIN_LOCK_SECONDS: ${LOGIN_LOCK_SECONDS:-900}
   LOGIN_IP_MAX_ATTEMPTS: ${LOGIN_IP_MAX_ATTEMPTS:-25}
+  PASSWORD_RESET_COOLDOWN_SECONDS: ${PASSWORD_RESET_COOLDOWN_SECONDS:-40}
+  PASSWORD_RESET_TTL_SECONDS: ${PASSWORD_RESET_TTL_SECONDS:-3600}
+  FIRST_ACCESS_TTL_SECONDS: ${FIRST_ACCESS_TTL_SECONDS:-86400}
   TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
   BASE_DOMAIN: ${BASE_DOMAIN}
   PUBLIC_ROUTE_SCHEME: ${PUBLIC_ROUTE_SCHEME:-}
@@ -47,12 +50,21 @@ services:
       APP_CONTEXT: portal
       APP_NAME: Threeebs Portal
       APP_URL: ${PORTAL_URL}
+      PORTAL_URL: ${PORTAL_URL}
       SANDBOX_URL: ${SANDBOX_URL}
+      PREVIEW_BASE_DOMAIN: ${PREVIEW_BASE_DOMAIN}
+      THREEEBS_PREPARE_PROJECTS: "true"
+      PARTNER_CONFIRMATION_TTL_SECONDS: ${PARTNER_CONFIRMATION_TTL_SECONDS:-86400}
+      PARTNER_CONFIRMATION_MAX_PER_HOUR: ${PARTNER_CONFIRMATION_MAX_PER_HOUR:-5}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-}
+      N8N_WEBHOOK_TIMEOUT_SECONDS: ${N8N_WEBHOOK_TIMEOUT_SECONDS:-5}
       DB_USER: ${THREEEBS_PORTAL_DB_USER}
       DB_PASSWORD: ${THREEEBS_PORTAL_DB_PASSWORD}
     volumes:
       - ./apps/portal:/var/www/app:ro
       - ./apps/shared:/var/www/shared:ro
+      - ./storage/projects:/var/www/projects
       - ./storage/logs/portal:/var/log/apache2
       - ./infrastructure/apache/portal-vhost.conf:/etc/apache2/sites-enabled/000-default.conf:ro
 
@@ -66,7 +78,11 @@ services:
       APP_CONTEXT: admin
       APP_NAME: Threeebs Admin
       APP_URL: ${ADMIN_URL}
+      PORTAL_URL: ${PORTAL_URL}
       SANDBOX_URL: ${SANDBOX_URL}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-}
+      N8N_WEBHOOK_TIMEOUT_SECONDS: ${N8N_WEBHOOK_TIMEOUT_SECONDS:-5}
       THREEEBS_SETUP_KEY: ${THREEEBS_SETUP_KEY}
       THREEEBS_PREPARE_PROJECTS: "true"
       DB_USER: ${THREEEBS_ADMIN_DB_USER}
@@ -89,6 +105,8 @@ services:
       APP_NAME: Threeebs Sandbox
       APP_URL: ${SANDBOX_URL}
       THREEEBS_PREPARE_PROJECTS: "true"
+      REALTIME_INTERNAL_SECRET: ${REALTIME_INTERNAL_SECRET}
+      REALTIME_TICKET_TTL_SECONDS: ${REALTIME_TICKET_TTL_SECONDS:-30}
       DB_USER: ${THREEEBS_SANDBOX_DB_USER}
       DB_PASSWORD: ${THREEEBS_SANDBOX_DB_PASSWORD}
     volumes:
@@ -97,6 +115,44 @@ services:
       - ./storage/projects:/var/www/projects
       - ./storage/logs/sandbox:/var/log/apache2
       - ./infrastructure/apache/sandbox-vhost.conf:/etc/apache2/sites-enabled/000-default.conf:ro
+    networks:
+      - threeebs
+      - realtime
+
+  realtime:
+    build:
+      context: .
+      dockerfile: apps/realtime/Dockerfile
+    container_name: threeebs-${PROJECT_SLUG}-realtime
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      TZ: ${TZ}
+      REALTIME_PORT: 1234
+      REALTIME_INTERNAL_URL: http://sandbox
+      REALTIME_INTERNAL_SECRET: ${REALTIME_INTERNAL_SECRET}
+      REALTIME_CHECKPOINT_DEBOUNCE_MS: ${REALTIME_CHECKPOINT_DEBOUNCE_MS:-2000}
+      REALTIME_CHECKPOINT_MAX_MS: ${REALTIME_CHECKPOINT_MAX_MS:-10000}
+      REALTIME_MAX_MESSAGE_BYTES: ${REALTIME_MAX_MESSAGE_BYTES:-1048576}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+      sandbox:
+        condition: service_started
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:1234/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [realtime]
 
   host:
     <<: *php-service
@@ -108,13 +164,20 @@ services:
       APP_CONTEXT: host
       APP_NAME: Threeebs Host
       APP_URL: ${HOST_URL}
+      PORTAL_URL: ${PORTAL_URL}
       DB_USER: ${THREEEBS_HOST_DB_USER}
       DB_PASSWORD: ${THREEEBS_HOST_DB_PASSWORD}
+      RUNTIME_CONTAINER_PREFIX: threeebs-${PROJECT_SLUG}-php-
+      RUNTIME_PROXY_TIMEOUT_SECONDS: ${RUNTIME_PROXY_TIMEOUT_SECONDS:-15}
+      RUNTIME_PROXY_MAX_BODY_BYTES: ${RUNTIME_PROXY_MAX_BODY_BYTES:-8388608}
     volumes:
       - ./apps/host:/var/www/app:ro
       - ./storage/projects:/var/www/projects:ro
       - ./storage/logs/host:/var/log/apache2
       - ./infrastructure/apache/host-vhost.conf:/etc/apache2/sites-enabled/000-default.conf:ro
+    networks:
+      - threeebs
+      - runtime-ingress
 
   mysql:
     image: mysql:8.4
@@ -147,6 +210,64 @@ services:
       start_period: 45s
     networks: [threeebs]
 
+  projects-db:
+    image: mysql:8.4
+    container_name: threeebs-${PROJECT_SLUG}-projects-db
+    restart: unless-stopped
+    profiles: [runtime-foundation]
+    ports:
+      - "${BIND_ADDRESS}:${PROJECTS_MYSQL_PORT:-6017}:3306"
+    environment:
+      TZ: ${TZ}
+      MYSQL_ROOT_PASSWORD: ${PROJECTS_MYSQL_ROOT_PASSWORD:-}
+    volumes:
+      - projects_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysqladmin ping -h localhost -uroot --silent']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [projects-runtime]
+
+  runtime-sandbox-probe:
+    image: mysql:8.4
+    container_name: threeebs-${PROJECT_SLUG}-runtime-sandbox-probe
+    restart: "no"
+    profiles: [runtime-foundation]
+    entrypoint: [/bin/sh, -c]
+    command: ["trap : TERM INT; sleep infinity & wait"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    volumes:
+      - ./storage/projects/${RUNTIME_PROJECT_UUID:-_disabled}/sandbox:/var/www/project:ro
+    depends_on:
+      projects-db:
+        condition: service_healthy
+    networks: [projects-runtime]
+
+  runtime-production-probe:
+    image: mysql:8.4
+    container_name: threeebs-${PROJECT_SLUG}-runtime-production-probe
+    restart: "no"
+    profiles: [runtime-foundation]
+    entrypoint: [/bin/sh, -c]
+    command: ["trap : TERM INT; sleep infinity & wait"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    volumes:
+      - ./storage/projects/${RUNTIME_PROJECT_UUID:-_disabled}/production:/var/www/project:ro
+    depends_on:
+      projects-db:
+        condition: service_healthy
+    networks: [projects-runtime]
+
   redis:
     image: redis:8-alpine
     container_name: threeebs-${PROJECT_SLUG}-redis
@@ -163,7 +284,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks: [threeebs]
+    networks:
+      - threeebs
+      - realtime
 
   phpmyadmin:
     image: phpmyadmin:5-apache
@@ -191,7 +314,7 @@ services:
     volumes:
       - ./infrastructure/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
       - ./infrastructure/cloudflared/credentials:/etc/cloudflared/credentials:ro
-    depends_on: [portal, admin, sandbox, host]
+    depends_on: [portal, admin, sandbox, realtime, host]
     networks: [threeebs]
 
 volumes:
@@ -199,8 +322,22 @@ volumes:
     name: threeebs-${PROJECT_SLUG}-mysql-data
   redis_data:
     name: threeebs-${PROJECT_SLUG}-redis-data
+  projects_mysql_data:
+    name: threeebs-${PROJECT_SLUG}-projects-mysql-data
 
 networks:
   threeebs:
     name: threeebs-${PROJECT_SLUG}-network
     driver: bridge
+  realtime:
+    name: threeebs-${PROJECT_SLUG}-realtime-network
+    driver: bridge
+    internal: true
+  projects-runtime:
+    name: threeebs-${PROJECT_SLUG}-projects-runtime-network
+    driver: bridge
+    internal: true
+  runtime-ingress:
+    name: threeebs-${PROJECT_SLUG}-runtime-ingress-network
+    driver: bridge
+    internal: true

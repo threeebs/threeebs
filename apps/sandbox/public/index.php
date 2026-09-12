@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 require '/var/www/shared/bootstrap.php';
+require '/var/www/shared/project_migrations.php';
+require '/var/www/shared/environment_operations.php';
 
 $path = request_path();
 $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
@@ -20,10 +22,12 @@ function sandbox_page_start(string $title, bool $editor = false): void
     echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'
         . '<meta name="viewport" content="width=device-width,initial-scale=1">'
         . '<title>' . h($title) . '</title>'
+        . '<link rel="icon" href="/assets/identity/image/logo/logo-symbol-brand.png">'
         . '<link rel="stylesheet" href="/assets/css/editor.css">';
     if ($editor) {
         echo '<script defer src="/vendor/monaco/vs/loader.js"></script>'
-            . '<script defer src="/assets/js/editor.js"></script>';
+            . '<script defer src="/vendor/realtime/realtime-client.js?v=20260907-2"></script>'
+            . '<script defer src="/assets/js/editor.js?v=20260907-2"></script>';
     }
     echo '</head><body>';
 }
@@ -48,21 +52,88 @@ function sandbox_editor_audit(array $access, string $action, array $details): vo
     );
 }
 
+if ($method === 'GET' && $path === '/api/realtime/file') {
+    try {
+        realtime_require_internal_request();
+        $access = realtime_internal_access(
+            (string) ($_GET['user_uuid'] ?? ''),
+            (string) ($_GET['project_uuid'] ?? ''),
+            (string) ($_GET['environment_uuid'] ?? '')
+        );
+        $storage = project_storage_service($access);
+        $file = $storage->readFile((string) ($_GET['path'] ?? ''));
+        realtime_validate_room($access, (string) $file['path'], (string) ($_GET['room'] ?? ''));
+        sandbox_json(['file' => $file]);
+    } catch (Throwable $error) {
+        error_log('Threeebs realtime read failure: ' . $error->getMessage());
+        sandbox_json(
+            ['error' => public_error_message($error)],
+            $error instanceof RealtimeAuthorizationException
+                ? 403
+                : ($error instanceof ValidationException ? 422 : 500)
+        );
+    }
+}
+
 if ($method === 'GET' && in_array($path, ['/api/editor/tree', '/api/editor/file'], true)) {
     try {
         $access = sandbox_editor_access((string) ($_GET['uuid'] ?? ''));
+        $storage = project_storage_service($access);
         if ($path === '/api/editor/tree') {
-            sandbox_json(['tree' => sandbox_editor_tree($access['root'])]);
+            sandbox_json(['tree' => $storage->tree(), 'usage' => $storage->usage()]);
         }
         sandbox_json([
-            'file' => sandbox_editor_read_file(
-                $access['root'],
-                (string) ($_GET['path'] ?? '')
-            ),
+            'file' => $storage->readFile((string) ($_GET['path'] ?? '')),
         ]);
     } catch (Throwable $error) {
         error_log('Threeebs editor read failure: ' . $error->getMessage());
         sandbox_json(['error' => public_error_message($error)], $error instanceof ValidationException ? 422 : 500);
+    }
+}
+
+if ($method === 'POST' && $path === '/api/realtime/checkpoint') {
+    try {
+        realtime_require_internal_request();
+        $raw = file_get_contents('php://input');
+        if (!is_string($raw) || strlen($raw) > 17 * 1024 * 1024) {
+            throw new ValidationException('Checkpoint realtime inválido.');
+        }
+        $payload = json_decode($raw, true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($payload)) {
+            throw new ValidationException('Checkpoint realtime inválido.');
+        }
+        $access = realtime_internal_access(
+            (string) ($payload['user_uuid'] ?? ''),
+            (string) ($payload['project_uuid'] ?? ''),
+            (string) ($payload['environment_uuid'] ?? '')
+        );
+        $storage = project_storage_service(
+            $access,
+            fn (string $storageAction, array $details) => sandbox_editor_audit(
+                $access,
+                $storageAction,
+                $details + [
+                    'origem' => 'realtime',
+                    'ator_usuario_uuid' => (string) $access['user']['uuid'],
+                ]
+            )
+        );
+        $existing = $storage->readFile((string) ($payload['path'] ?? ''));
+        realtime_validate_room($access, (string) $existing['path'], (string) ($payload['room'] ?? ''));
+        $hash = $storage->writeFile(
+            (string) $existing['path'],
+            (string) ($payload['content'] ?? ''),
+            (string) ($payload['expected_hash'] ?? '')
+        );
+        sandbox_json(['ok' => true, 'hash' => $hash]);
+    } catch (Throwable $error) {
+        error_log('Threeebs realtime checkpoint failure: ' . $error->getMessage());
+        sandbox_json(
+            ['error' => public_error_message($error)],
+            $error instanceof RealtimeAuthorizationException
+                ? 403
+                : ($error instanceof ValidationException ? 422 : 500)
+        );
     }
 }
 
@@ -80,46 +151,87 @@ if ($method === 'POST') {
             logout_user();
             redirect('/login');
         }
+        if (in_array($action, ['migration_validate', 'migration_apply'], true)) {
+            $access = sandbox_editor_access((string) ($_POST['projeto_uuid'] ?? ''));
+            if (!project_user_can_manage_database($access['project'])) {
+                http_response_code(403);
+                throw new ValidationException(
+                    'Somente gestores e desenvolvedores do projeto podem operar migrations.'
+                );
+            }
+            $manifest = project_migration_manifest((string) $access['root']);
+            if ($manifest === []) {
+                throw new ValidationException(
+                    'Crie ao menos uma migration em database/migrations antes de continuar.'
+                );
+            }
+            if ($action === 'migration_validate') {
+                sandbox_editor_audit($access, 'database.migrations_validadas', [
+                    'arquivos' => count($manifest),
+                ]);
+                flash(count($manifest) . ' migration(s) validada(s) com sucesso.');
+            } else {
+                $environment = environment_for_project(
+                    (string) $access['project']['uuid'],
+                    (string) $access['environment']['uuid']
+                );
+                if (!environment_operation_is_satisfied($environment, 'database.provision')) {
+                    throw new ValidationException(
+                        'Crie o banco de dados do Sandbox no painel Admin antes de aplicar migrations.'
+                    );
+                }
+                queue_environment_operation(
+                    $environment,
+                    'database.migrations.apply',
+                    (string) current_active_user()['uuid'],
+                    ['migrations' => $manifest]
+                );
+                flash('Aplicação das migrations adicionada à fila do Sandbox.');
+            }
+            redirect('/migrations?uuid=' . rawurlencode((string) $access['project']['uuid']));
+        }
+
         if (str_starts_with($action, 'editor_')) {
             $access = sandbox_editor_access((string) ($_POST['projeto_uuid'] ?? ''));
             $itemPath = (string) ($_POST['path'] ?? '');
+            $storage = project_storage_service(
+                $access,
+                fn (string $storageAction, array $details) => sandbox_editor_audit(
+                    $access,
+                    $storageAction,
+                    $details
+                )
+            );
+            if ($action === 'editor_realtime_ticket') {
+                $user = current_active_user();
+                if (!$user) {
+                    throw new ValidationException('Sessão inválida.');
+                }
+                sandbox_json(realtime_issue_ticket($access, $user, $itemPath));
+            }
             if ($action === 'editor_save') {
-                $hash = sandbox_editor_write_file(
-                    $access['root'],
+                $hash = $storage->writeFile(
                     $itemPath,
                     (string) ($_POST['content'] ?? ''),
                     (string) ($_POST['expected_hash'] ?? '')
                 );
-                sandbox_editor_audit($access, 'sandbox.arquivo_alterado', ['arquivo' => $itemPath]);
                 sandbox_json(['ok' => true, 'hash' => $hash]);
             }
             if ($action === 'editor_create_file') {
-                sandbox_editor_create_file($access['root'], $itemPath);
-                sandbox_editor_audit($access, 'sandbox.arquivo_criado', ['arquivo' => $itemPath]);
+                $storage->createFile($itemPath);
                 sandbox_json(['ok' => true]);
             }
             if ($action === 'editor_create_directory') {
-                sandbox_editor_create_directory($access['root'], $itemPath);
-                sandbox_editor_audit($access, 'sandbox.pasta_criada', ['pasta' => $itemPath]);
+                $storage->createDirectory($itemPath);
                 sandbox_json(['ok' => true]);
             }
             if ($action === 'editor_rename') {
                 $destination = (string) ($_POST['destination'] ?? '');
-                sandbox_editor_rename($access['root'], $itemPath, $destination);
-                sandbox_editor_audit(
-                    $access,
-                    'sandbox.item_renomeado',
-                    ['origem' => $itemPath, 'destino' => $destination]
-                );
+                $storage->rename($itemPath, $destination);
                 sandbox_json(['ok' => true]);
             }
             if ($action === 'editor_delete') {
-                $type = sandbox_editor_delete($access['root'], $itemPath);
-                sandbox_editor_audit(
-                    $access,
-                    $type === 'directory' ? 'sandbox.pasta_excluida' : 'sandbox.arquivo_excluido',
-                    [($type === 'directory' ? 'pasta' : 'arquivo') => $itemPath]
-                );
+                $storage->delete($itemPath);
                 sandbox_json(['ok' => true]);
             }
             throw new ValidationException('Ação do editor inválida.');
@@ -168,6 +280,72 @@ if ($path === '/') {
     exit;
 }
 
+if ($path === '/migrations') {
+    $access = sandbox_editor_access((string) ($_GET['uuid'] ?? ''));
+    if (!project_user_can_manage_database($access['project'], $user)) {
+        http_response_code(403);
+        exit('Somente gestores e desenvolvedores do projeto podem operar migrations.');
+    }
+    $manifest = project_migration_manifest((string) $access['root']);
+    $environment = environment_for_project(
+        (string) $access['project']['uuid'],
+        (string) $access['environment']['uuid']
+    );
+    $databaseActive = environment_operation_is_satisfied($environment, 'database.provision');
+    $operation = db('control')->prepare(
+        "SELECT status,erro_codigo,solicitado_em,concluido_em
+         FROM ambiente_operacoes
+         WHERE ambiente_id=:environment AND tipo='database.migrations.apply'
+         ORDER BY id DESC LIMIT 1"
+    );
+    $operation->execute(['environment' => $environment['id']]);
+    $latestOperation = $operation->fetch();
+
+    sandbox_page_start('Migrations — ' . (string) $access['project']['nome']);
+    echo '<header class="sandbox-header"><p class="sandbox-kicker">Threeebs :3 / Database</p>'
+        . '<div class="sandbox-nav"><h1>Migrations do Sandbox</h1>'
+        . '<a href="/projeto?uuid=' . h($access['project']['uuid']) . '">Voltar ao editor</a></div></header>'
+        . '<main class="sandbox-auth">';
+    show_flash();
+    echo '<p>Banco de dados: <strong>' . ($databaseActive ? 'ativo' : 'não configurado') . '</strong></p>'
+        . '<p>Diretório versionado: <code>database/migrations</code></p>';
+    if ($latestOperation) {
+        echo '<p>Última aplicação: <strong>'
+            . h(environment_operation_status_label((string) $latestOperation['status']))
+            . '</strong>';
+        if (!empty($latestOperation['erro_codigo'])) {
+            echo ' — erro <code>' . h($latestOperation['erro_codigo']) . '</code>';
+        }
+        echo '</p>';
+    }
+    if ($manifest === []) {
+        echo '<p>Nenhuma migration encontrada. Use o padrão '
+            . '<code>AAAAMMDDHHMMSS_nome_em_snake_case.sql</code>.</p>';
+    } else {
+        echo '<table><thead><tr><th>Migration</th><th>SHA-256</th><th>Tamanho</th></tr></thead><tbody>';
+        foreach ($manifest as $migration) {
+            echo '<tr><td><code>' . h($migration['name']) . '</code></td>'
+                . '<td><code>' . h(substr((string) $migration['sha256'], 0, 12)) . '…</code></td>'
+                . '<td>' . h($migration['size']) . ' bytes</td></tr>';
+        }
+        echo '</tbody></table>';
+    }
+    $busy = is_array($latestOperation)
+        && in_array((string) $latestOperation['status'], ['pendente', 'executando'], true);
+    echo '<form method="post">' . csrf_field()
+        . '<input type="hidden" name="_action" value="migration_validate">'
+        . '<input type="hidden" name="projeto_uuid" value="' . h($access['project']['uuid']) . '">'
+        . '<input type="hidden" name="_return" value="/migrations?uuid=' . h($access['project']['uuid']) . '">'
+        . '<button' . ($manifest === [] ? ' disabled' : '') . '>Validar migrations</button></form>'
+        . '<form method="post">' . csrf_field()
+        . '<input type="hidden" name="_action" value="migration_apply">'
+        . '<input type="hidden" name="projeto_uuid" value="' . h($access['project']['uuid']) . '">'
+        . '<input type="hidden" name="_return" value="/migrations?uuid=' . h($access['project']['uuid']) . '">'
+        . '<button' . (!$databaseActive || $manifest === [] || $busy ? ' disabled' : '')
+        . '>Aplicar no Sandbox</button></form></main></body></html>';
+    exit;
+}
+
 if ($path === '/projeto') {
     $access = sandbox_editor_access((string) ($_GET['uuid'] ?? ''));
     $project = $access['project'];
@@ -185,6 +363,9 @@ if ($path === '/projeto') {
     echo '<header class="sandbox-header"><p class="sandbox-kicker">Threeebs :3 / Monaco edita</p>'
         . '<div class="sandbox-nav"><h1>' . h($project['nome']) . '</h1>'
         . '<a href="/">Projetos</a>';
+    if (project_user_can_manage_database($project, $user)) {
+        echo '<a href="/migrations?uuid=' . h($project['uuid']) . '">Migrations</a>';
+    }
     if (is_string($hostname) && $hostname !== '') {
         echo '<a href="' . h(public_route_url($hostname)) . '" target="_blank" rel="noopener">'
             . 'Abrir preview Sandbox</a>';
@@ -195,7 +376,8 @@ if ($path === '/projeto') {
     show_flash();
     echo '<main class="sandbox-editor" data-threeebs-editor'
         . ' data-project-uuid="' . h($project['uuid']) . '"'
-        . ' data-csrf="' . h(csrf_token()) . '">'
+        . ' data-csrf="' . h(csrf_token()) . '"'
+        . ' data-realtime="enabled">'
         . '<aside class="explorer"><div class="explorer-toolbar">'
         . '<button type="button" id="create-file">+ Arquivo</button>'
         . '<button type="button" id="create-directory">+ Pasta</button>'

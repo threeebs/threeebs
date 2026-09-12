@@ -75,6 +75,8 @@
   .page-content { padding-top: 2.5rem; }
   .topbar { padding-inline: .75rem; }
   .topbar-actions { gap: .35rem; }
+  .user-chip, .topbar-logout-button span { display: none; }
+  .topbar-logout-button { width: 2.75rem; padding: 0; }
   .breadcrumb strong { max-width: 9rem; }
   .hero { min-height: auto; }
   .hero h1 { font-size: clamp(2.8rem,14vw,4.5rem); }

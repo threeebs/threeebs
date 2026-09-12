@@ -17,6 +17,8 @@
     let currentPath = '';
     let currentHash = '';
     let dirty = false;
+    let realtimeSession = null;
+    let realtimeGeneration = 0;
 
     function setStatus(message, error) {
         statusElement.textContent = message;
@@ -52,7 +54,7 @@
         const extension = path.split('.').pop().toLowerCase();
         return ({
             html: 'html', htm: 'html', css: 'css', js: 'javascript', mjs: 'javascript',
-            cjs: 'javascript', json: 'json', md: 'markdown', xml: 'xml', svg: 'xml', txt: 'plaintext'
+            cjs: 'javascript', json: 'json', md: 'markdown', xml: 'xml', svg: 'xml', php: 'php', txt: 'plaintext'
         })[extension] || 'plaintext';
     }
 
@@ -78,8 +80,33 @@
         deleteButton.disabled = false;
     }
 
+    function disconnectRealtime() {
+        realtimeGeneration += 1;
+        if (realtimeSession) realtimeSession.destroy();
+        realtimeSession = null;
+    }
+
+    function connectRealtime(model, path) {
+        if (root.dataset.realtime !== 'enabled' || !window.ThreeebsRealtime) return;
+        const generation = ++realtimeGeneration;
+        realtimeSession = window.ThreeebsRealtime.connect({
+            editor,
+            model,
+            getTicket: () => apiPost('editor_realtime_ticket', { path }),
+            onStatus(state, error) {
+                if (generation !== realtimeGeneration) return;
+                if (state === 'connected') setStatus('Colaboração em tempo real conectada.');
+                if (state === 'disconnected') setStatus('Reconectando colaboração…');
+                if (state === 'saving') setStatus('Salvando checkpoint…');
+                if (state === 'saved') setStatus('Checkpoint confirmado pelo Storage Service.');
+                if (state === 'error') setStatus(error?.message || 'Falha na colaboração em tempo real.', true);
+            }
+        });
+    }
+
     async function openFile(button, node) {
         if (dirty && !window.confirm('Descartar alterações ainda não salvas?')) return;
+        disconnectRealtime();
         selectTreeButton(button, node);
         if (!node.editable) {
             currentPath = '';
@@ -104,9 +131,11 @@
             if (previous) previous.dispose();
             const model = window.monaco.editor.createModel(payload.file.content, languageFor(currentPath), uri);
             editor.setModel(model);
+            model.setEOL(window.monaco.editor.EndOfLineSequence.LF);
             dirty = false;
             saveButton.disabled = false;
             setStatus('Arquivo carregado.');
+            connectRealtime(model, currentPath);
         } catch (error) {
             setStatus(error.message, true);
         }
@@ -157,6 +186,24 @@
 
     async function saveFile() {
         if (!editor || !currentPath) return;
+        if (realtimeSession) {
+            saveButton.disabled = true;
+            try {
+                const wasDirty = dirty;
+                const payload = await realtimeSession.requestCheckpoint();
+                if (wasDirty && payload.unchanged === true && payload.hash === currentHash) {
+                    throw new Error('A alteração ainda não chegou ao documento colaborativo.');
+                }
+                if (payload.hash) currentHash = payload.hash;
+                dirty = false;
+                setStatus('Checkpoint confirmado pelo Storage Service.');
+            } catch (error) {
+                setStatus(error.message, true);
+            } finally {
+                saveButton.disabled = false;
+            }
+            return;
+        }
         saveButton.disabled = true;
         setStatus('Salvando…');
         try {
@@ -202,6 +249,7 @@
         try {
             await apiPost('editor_rename', { path: selected.path, destination: destination.trim() });
             if (currentPath === selected.path || currentPath.startsWith(selected.path + '/')) {
+                disconnectRealtime();
                 currentPath = '';
                 currentHash = '';
                 editor.setValue('');
@@ -218,6 +266,7 @@
         try {
             await apiPost('editor_delete', { path: deleting });
             if (currentPath === deleting) {
+                disconnectRealtime();
                 currentPath = '';
                 currentHash = '';
                 editor.setValue('');
@@ -230,6 +279,7 @@
     });
 
     saveButton.addEventListener('click', saveFile);
+    window.addEventListener('beforeunload', disconnectRealtime);
 
     window.require.config({ paths: { vs: '/vendor/monaco/vs' } });
     window.require(['vs/editor/editor.main'], function () {
